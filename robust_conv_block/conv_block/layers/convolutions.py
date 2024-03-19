@@ -28,6 +28,63 @@ class MaskedConv2d(nn.Conv2d):
         return super(MaskedConv2d, self).forward(x)
 
 
+def create_conv_layer(
+    in_channels: int,
+    out_channels: int,
+    kernel_size: int = 3,
+    padding: Union[str, _size_2_t] = "same",
+    stride: _size_2_t = 1,
+    dilation: _size_2_t = 1,
+    tensor_dim: int = 2,
+    causal: bool = False,
+    groups: int = 1,
+    separable: bool = False,
+    bias: bool = True,
+) -> nn.Module:
+    """
+    Create a convolutional layer based on the tensor dimension and the parameters passed.
+    :param in_channels: number of input channels
+    :param out_channels: number of output channels
+    :param kernel_size: size of the kernel
+    :param padding: padding type
+    :param stride: convolution stride
+    :param dilation: convolution dilation
+    :param tensor_dim:  dimension of the tensor (currently only 1 or 2 are supported)
+    :param causal: whether the convolution should be causal
+    :param groups:  number of groups for the convolution
+    :param separable: whether the convolution should be separable
+    :param bias: whether to use bias in the convolution
+    :return: convolutional layer
+    """
+
+    if tensor_dim == 2:
+        conv_layer = ConvLayer2d
+    elif tensor_dim == 1:
+        conv_layer = ConvLayer1d
+    else:
+        raise ValueError("Only 1d and 2d convolutions are supported")
+
+    if groups != 1 and separable:
+        warnings.warn(
+            "groups parameter has no affect when using separable convolutions"
+        )
+
+    conv = conv_layer(
+        in_channels,
+        out_channels,
+        kernel_size,
+        padding,
+        stride,
+        dilation,
+        causal,
+        groups,
+        separable,
+        bias,
+    )
+
+    return conv
+
+
 def create_separable_conv_layer(
     in_channels: int,
     out_channels: int,
@@ -38,7 +95,11 @@ def create_separable_conv_layer(
     dilation: _size_2_t,
     causal: bool,
     bias: bool,
-):
+) -> nn.Module:
+    """
+    Create a separable convolutional layer based on the tensor dimension and the parameters passed.
+    A separable convolution may also be Causal.
+    """
 
     if tensor_dim == 1:
         depthwise = nn.Conv1d
@@ -88,7 +149,7 @@ class ConvLayer1d(nn.Module):
         in_channels: int,
         out_channels: int,
         kernel_size: int = 3,
-        padding: Union[str, int] = "SAME",
+        padding: Union[str, int] = "same",
         stride: int = 1,
         dilation: int = 1,
         causal: bool = False,
@@ -174,63 +235,6 @@ class ConvLayer1d(nn.Module):
         return output
 
 
-def create_conv_layer(
-    in_channels: int,
-    out_channels: int,
-    kernel_size: int = 3,
-    padding: Union[str, _size_2_t] = "SAME",
-    stride: _size_2_t = 1,
-    dilation: _size_2_t = 1,
-    tensor_dim: int = 2,
-    causal: bool = False,
-    groups: int = 1,
-    separable: bool = False,
-    bias: bool = True,
-) -> nn.Module:
-    """
-    Create a convolutional layer based on the tensor dimension and the parameters passed.
-    :param in_channels: number of input channels
-    :param out_channels: number of output channels
-    :param kernel_size: size of the kernel
-    :param padding: padding type
-    :param stride: convolution stride
-    :param dilation: convolution dilation
-    :param tensor_dim:  dimension of the tensor (currently only 1 or 2 are supported)
-    :param causal: whether the convolution should be causal
-    :param groups:  number of groups for the convolution
-    :param separable: whether the convolution should be separable
-    :param bias: whether to use bias in the convolution
-    :return: convolutional layer
-    """
-
-    if tensor_dim == 2:
-        conv_layer = ConvLayer2d
-    elif tensor_dim == 1:
-        conv_layer = ConvLayer1d
-    else:
-        raise ValueError("Only 1d and 2d convolutions are supported")
-
-    if groups != 1 and separable:
-        warnings.warn(
-            "groups parameter has no affect when using separable convolutions"
-        )
-
-    conv = conv_layer(
-        in_channels,
-        out_channels,
-        kernel_size,
-        padding,
-        stride,
-        dilation,
-        causal,
-        groups,
-        separable,
-        bias,
-    )
-
-    return conv
-
-
 class ConvLayer2d(nn.Module):
     """
     Conv layer abstraction. Input is assumed to be in canonical form: [Batch_size, channels, frames, features] for the 2d case.
@@ -243,7 +247,7 @@ class ConvLayer2d(nn.Module):
         in_channels: int,
         out_channels: int,
         kernel_size: _size_2_t = 3,
-        padding: Union[str, _size_2_t] = "SAME",
+        padding: Union[str, _size_2_t] = "same",
         stride: _size_2_t = 1,
         dilation: _size_2_t = 1,
         causal: bool = False,

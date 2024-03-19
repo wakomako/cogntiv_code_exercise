@@ -39,6 +39,6 @@ class PoolLayer(nn.Module):
         else:
             raise ValueError(f"Only 1d and 2d tensors are supported. Got: {tensor_dim}")
 
-    def forward(self, input):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = self.pool(input)
         return output

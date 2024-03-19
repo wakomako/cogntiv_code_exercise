@@ -20,7 +20,7 @@ class ConvBlock(nn.Module):
         out_channels: int,
         conv_block: Sequence[Operations],
         kernel_size: _size_2_t = 3,
-        padding: Union[str, _size_2_t] = "SAME",
+        padding: Union[str, _size_2_t] = "same",
         stride: _size_2_t = 1,
         dilation: _size_2_t = 1,
         tensor_dim: int = 2,
