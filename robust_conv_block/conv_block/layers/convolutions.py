@@ -1,13 +1,20 @@
+import warnings
+from typing import Union
+
 import torch
 import torch.nn as nn
-import numpy as np
-from torch.nn.modules.utils import _pair
+from torch.nn.common_types import _size_2_t
 
 
 class MaskedConv2d(nn.Conv2d):
     """implementation taken from https://github.com/jzbontar/pixelcnn-pytorch/blob/14c9414602e0694692c77a5e0d87188adcded118/main.py"""
 
-    def __init__(self, mask_type, *args, **kwargs):
+    def __init__(
+        self,
+        mask_type="B",
+        *args,
+        **kwargs,
+    ):
         super(MaskedConv2d, self).__init__(*args, **kwargs)
         assert mask_type in {"A", "B"}
         self.register_buffer("mask", self.weight.data.clone())
@@ -21,58 +28,210 @@ class MaskedConv2d(nn.Conv2d):
         return super(MaskedConv2d, self).forward(x)
 
 
-class SeparableConv2d(nn.Module):
+def create_separable_conv_layer(
+    in_channels: int,
+    out_channels: int,
+    tensor_dim: int,
+    kernel_size: _size_2_t,
+    padding: Union[str, _size_2_t],
+    stride: _size_2_t,
+    dilation: _size_2_t,
+    causal: bool,
+    bias: bool,
+):
 
-    def __init__(self, in_channels, out_channels, kernel_size, bias=False):
-        super(SeparableConv2d, self).__init__()
-        self.depthwise = nn.Conv2d(
-            in_channels,
-            in_channels,
+    if tensor_dim == 1:
+        depthwise = nn.Conv1d
+        pointwise = nn.Conv1d
+
+    elif tensor_dim == 2:
+
+        depthwise = MaskedConv2d if causal else nn.Conv2d
+        pointwise = nn.Conv2d
+
+    else:
+        raise ValueError("Only 1d and 2d convolutions are supported")
+
+    conv_layer = []
+    conv_layer.append(
+        depthwise(
+            in_channels=in_channels,
+            out_channels=in_channels,
             kernel_size=kernel_size,
+            padding=padding,
+            dilation=dilation,
+            stride=stride,
             groups=in_channels,
             bias=bias,
-            padding=1,
         )
-        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=bias)
+    )
+    conv_layer.append(
+        pointwise(
+            in_channels,
+            out_channels,
+            kernel_size=1,
+            padding=0,
+            dilation=1,
+            stride=1,
+            bias=bias,
+        )
+    )
+    conv_layer = nn.Sequential(*conv_layer)
 
-    def forward(self, x):
-        out = self.depthwise(x)
-        out = self.pointwise(out)
-        return out
+    return conv_layer
 
 
-def create_2dconv(
+class ConvLayer1d(nn.Module):
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        padding: Union[str, int] = "SAME",
+        stride: int = 1,
+        dilation: int = 1,
+        causal: bool = False,
+        groups: int = 1,
+        separable: bool = False,
+        bias: bool = True,
+    ):
+        super(ConvLayer1d, self).__init__()
+
+        assert isinstance(
+            kernel_size, int
+        ), "For 1d tensors, kernel_size must be an integer."
+        assert isinstance(stride, int), "For 1d tensors, stride must be an integer."
+        assert isinstance(dilation, int), "For 1d tensors, dilation must be an integer."
+        assert isinstance(
+            padding, (str, int)
+        ), "For 1d tensors, padding must be an integer or a string in {‘valid’, ‘same’} ."
+
+        self.padding = padding
+        self.causal = causal
+        self.conv_layer = self._create_1dconv(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            dilation=dilation,
+            causal=causal,
+            groups=groups,
+            separable=separable,
+            bias=bias,
+        )
+
+    def _create_1dconv(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        dilation: int,
+        causal: bool,
+        groups: int,
+        separable: bool,
+        bias: bool,
+    ) -> nn.Module:
+
+        if causal:
+            self.padding = dilation * (kernel_size - 1)
+
+        if separable:
+            conv_layer = create_separable_conv_layer(
+                in_channels,
+                out_channels,
+                1,
+                kernel_size,
+                self.padding,
+                stride,
+                dilation,
+                causal,
+                bias,
+            )
+
+        else:
+            conv_layer = nn.Conv1d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                padding=self.padding,
+                dilation=dilation,
+                stride=stride,
+                groups=groups,
+                bias=bias,
+            )
+
+        return conv_layer
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = self.conv_layer(input)
+        if (
+            self.causal
+        ):  # a 1D causal convolution discrads the last elements of the output
+            output = output[..., : -self.padding]
+
+        return output
+
+
+def create_conv_layer(
     in_channels: int,
     out_channels: int,
     kernel_size: int = 3,
-    padding="SAME",
-    stride=1,
-    upsample=None,
-    dilation=1,
+    padding: Union[str, _size_2_t] = "SAME",
+    stride: _size_2_t = 1,
+    dilation: _size_2_t = 1,
+    tensor_dim: int = 2,
     causal: bool = False,
-    groups=1,
-    separable=False,
+    groups: int = 1,
+    separable: bool = False,
     bias: bool = True,
-):
+) -> nn.Module:
+    """
+    Create a convolutional layer based on the tensor dimension and the parameters passed.
+    :param in_channels: number of input channels
+    :param out_channels: number of output channels
+    :param kernel_size: size of the kernel
+    :param padding: padding type
+    :param stride: convolution stride
+    :param dilation: convolution dilation
+    :param tensor_dim:  dimension of the tensor (currently only 1 or 2 are supported)
+    :param causal: whether the convolution should be causal
+    :param groups:  number of groups for the convolution
+    :param separable: whether the convolution should be separable
+    :param bias: whether to use bias in the convolution
+    :return: convolutional layer
+    """
 
-    if (
-        causal
-    ):  # implement a 2d causal convolution using a masked convolution as was done in Pixel Recurrent Neural Networks
-        # https://proceedings.neurips.cc/paper_files/paper/2016/file/b1301141feffabac455e1f90a7de2054-Paper.pdf
-        return MaskedConv2d(
-            "B",
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            padding=padding,
-            stride=stride,
-            dilation=dilation,
-            groups=groups,
-            bias=bias,
+    if tensor_dim == 2:
+        conv_layer = ConvLayer2d
+    elif tensor_dim == 1:
+        conv_layer = ConvLayer1d
+    else:
+        raise ValueError("Only 1d and 2d convolutions are supported")
+
+    if groups != 1 and separable:
+        warnings.warn(
+            "groups parameter has no affect when using separable convolutions"
         )
 
+    conv = conv_layer(
+        in_channels,
+        out_channels,
+        kernel_size,
+        padding,
+        stride,
+        dilation,
+        causal,
+        groups,
+        separable,
+        bias,
+    )
 
-class ConvLayer(nn.Module):
+    return conv
+
+
+class ConvLayer2d(nn.Module):
     """
     Conv layer abstraction. Input is assumed to be in canonical form: [Batch_size, channels, frames, features] for the 2d case.
     Causal convolution implemented accoarding to:
@@ -81,102 +240,87 @@ class ConvLayer(nn.Module):
 
     def __init__(
         self,
-        in_channels,
-        out_channels,
-        kernel_size=3,
-        padding="SAME",
-        stride=1,
-        upsample=None,
-        dilation=1,
-        tensor_type="2d",
-        causal=False,
-        groups=1,
-        separable=False,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: _size_2_t = 3,
+        padding: Union[str, _size_2_t] = "SAME",
+        stride: _size_2_t = 1,
+        dilation: _size_2_t = 1,
+        causal: bool = False,
+        groups: int = 1,
+        separable: bool = False,
         bias: bool = True,
     ):
-        super(ConvLayer, self).__init__()
-        self.dilation = dilation
-        self.causal = causal
-        self.kernel_size = kernel_size
-        # 2D convolution
-        if tensor_type == "2d":
-            self.dilation = _pair(dilation)
-            self.kernel_size = _pair(kernel_size)
-            self.stride = _pair(stride)
-            self.padding = _pair(padding)
+        super(ConvLayer2d, self).__init__()
 
-            # Padding
-            if not causal:
-                if padding == "SAME":
-                    padding = ()
-                    for ii in range(len(kernel_size)):
-                        padding += (dilation[ii] * ((kernel_size[ii] - 1) // 2),)
-                elif padding == "VALID":
-                    padding = (0,) * len(kernel_size)
-            else:
-                self.conv_layer = create_2dconv(
-                    in_channels,
-                    out_channels,
-                    kernel_size=kernel_size,
-                    padding=padding,
-                    stride=stride,
-                    upsample=upsample,
-                    dilation=dilation,
-                    causal=causal,
-                    groups=groups,
-                    separable=separable,
-                    bias=bias,
-                )
-                return
+        conv2d = self._create_2dconv(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=stride,
+            dilation=dilation,
+            causal=causal,
+            groups=groups,
+            separable=separable,
+            bias=bias,
+        )
+        self.conv_layer = conv2d
 
-                padding = (
-                    dilation[0] * ((kernel_size[0] - 1) // 2),
-                    dilation[1] * (kernel_size[1] - 1),
-                )
+    def _create_2dconv(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: _size_2_t,
+        padding: Union[str, _size_2_t],
+        stride: _size_2_t,
+        dilation: _size_2_t,
+        causal: bool,
+        groups: int,
+        separable: bool,
+        bias: bool,
+    ) -> nn.Module:
 
-            # Full 2d conv
-            if separable is False:
-                self.conv_layer = nn.Conv2d(
-                    in_channels,
-                    out_channels,
-                    kernel_size=kernel_size,
-                    padding=padding,
-                    dilation=dilation,
-                    stride=stride,
-                    groups=groups,
-                )
-            # Separable conv
-            else:
-                conv_layer = []
-                conv_layer.append(
-                    nn.Conv2d(
-                        in_channels,
-                        in_channels,
-                        kernel_size=kernel_size,
-                        padding=padding,
-                        dilation=dilation,
-                        stride=stride,
-                        groups=in_channels,
-                    )
-                )
-                conv_layer.append(
-                    nn.Conv2d(
-                        in_channels,
-                        out_channels,
-                        kernel_size=1,
-                        padding=0,
-                        dilation=1,
-                        stride=1,
-                    )
-                )
-                self.conv_layer = nn.Sequential(*conv_layer)
+        if separable:
 
-        else:
-            raise ValueError("Only 2D convolutions are supported")
+            return create_separable_conv_layer(
+                in_channels,
+                out_channels,
+                2,
+                kernel_size,
+                padding,
+                stride,
+                dilation,
+                causal,
+                bias,
+            )
 
-    def forward(self, input):
+        if (
+            causal
+        ):  # implement a 2d causal convolution using a masked convolution as was done in Pixel Recurrent Neural Networks
+            # https://proceedings.neurips.cc/paper_files/paper/2016/file/b1301141feffabac455e1f90a7de2054-Paper.pdf
+            return MaskedConv2d(
+                "B",
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                padding=padding,
+                stride=stride,
+                dilation=dilation,
+                groups=groups,
+                bias=bias,
+            )
+
+        return nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            dilation=dilation,
+            stride=stride,
+            groups=groups,
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = self.conv_layer(input)
-        # if self.causal:
-        #     output = output[..., self.dilation[-1] * (self.kernel_size[1] - 1) :]
-
         return output

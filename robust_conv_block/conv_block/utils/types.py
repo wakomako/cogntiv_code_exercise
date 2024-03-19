@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import NewType, Tuple, Any
 
+
 class Activations(Enum):
     relu = auto()
     relu6 = auto()
@@ -10,6 +11,7 @@ class Activations(Enum):
     sigmoid = auto()
     elu = auto()
 
+
 class Operations(Enum):
     conv = auto()
     bn = auto()
@@ -17,15 +19,15 @@ class Operations(Enum):
     avg_pool = auto()
     dropout = auto()
     upsample = auto()
+    activation = auto()
 
 
 class WeightInit(Enum):
     kaiming = auto()
     xavier = auto()
-    normal = auto()
-    uniform = auto()
     zeros = auto()
-    ones = auto
+    ones = auto()
+    default = auto()  # will use the default initialization of pytorch
 
 
 ParameterizedOps = NewType("ParameterizedOps", Tuple[Operations, dict[str, Any]])

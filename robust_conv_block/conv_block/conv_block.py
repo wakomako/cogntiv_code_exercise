@@ -1,64 +1,14 @@
+import warnings
 from functools import partial
-from typing import Union, Optional
+from typing import Union, Sequence
 
 import torch.nn as nn
-from layers.convolutions import ConvLayer
-from layers.pooling import PoolLayer
+from torch.nn.common_types import _size_2_t
+
 from layers.activations import ActivationLayer
-import re
-
+from layers.convolutions import create_conv_layer
+from layers.pooling import PoolLayer
 from utils.types import Operations, Activations, WeightInit
-import warnings
-
-
-def _parse_operation(op: Operations):
-    if op == Operations.conv:
-        return ConvLayer
-    elif op == Operations.pool:
-        return PoolLayer
-    elif op == Operations.activ:
-        return ActivationLayer
-    else:
-        raise ValueError(f"Operation {op} not recognized.")
-
-
-def _init_weights(
-    m: nn.Module,
-    conv_init: WeightInit,
-    bn_init: WeightInit,
-    activation: Optional[Activations] = None,
-):
-    #  Initializing weights
-    if isinstance(m, nn.Conv2d):
-        if conv_init == WeightInit.kaiming:
-            if activation and activation not in [
-                Activations.relu,
-                Activations.elu,
-                Activations.lrelu,
-                Activations.relu6,
-            ]:
-                warnings.warn(
-                    f"Kaiming initialization is not recommended for {activation} activations."
-                )
-
-            nn.init.kaiming_normal_(m.weight, nonlinearity=activation)
-
-        elif conv_init == WeightInit.xavier:
-            nn.init.xavier_normal_(m.weight)
-
-        elif conv_init == WeightInit.zeros:
-            nn.init.zeros_(m.weight)
-
-    elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-        if bn_init == WeightInit.ones:
-            nn.init.ones_(m.weight)
-            nn.init.zeros_(m.bias)
-        elif bn_init == WeightInit.zeros:
-            # Zero-initialize the last BN in each residual branch,
-            # so that the residual branch starts with zeros, and each residual block behaves like an identity.
-            # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
-            nn.init.zeros_(m.weight)
-            nn.init.zeros_(m.bias)
 
 
 class ConvBlock(nn.Module):
@@ -68,213 +18,204 @@ class ConvBlock(nn.Module):
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: int = 3,
-        padding="SAME",
-        stride: int = 1,
-        dilation: int = 1,
-        tensor_type: str = "2d",
-        conv_block: tuple[Union[Operations, Activations]] = tuple(),
-        causal=False,
-        groups=1,
-        separable=False,
-        pool_stride=None,
-        pool_kernel=None,
-        upsample=None,
-        dropout=0.0,
-        conv_init="kaiming",
-        bn_init="default",
+        conv_block: Sequence[Operations],
+        kernel_size: _size_2_t = 3,
+        padding: Union[str, _size_2_t] = "SAME",
+        stride: _size_2_t = 1,
+        dilation: _size_2_t = 1,
+        tensor_dim: int = 2,
+        causal: bool = False,
+        groups: int = 1,
+        activation: Activations = Activations.relu,
+        separable: bool = False,
+        pool_stride: _size_2_t = 1,
+        pool_kernel: _size_2_t = 2,
+        upsample: _size_2_t = 2,
+        dropout: float = 0.0,
+        conv_init: WeightInit = WeightInit.kaiming,
+        bn_init: WeightInit = WeightInit.default,
     ):
+        """
+        :param in_channels: number of input channels
+        :param out_channels: number of output channels
+        :param conv_block:  sequence of operations to be performed in the block
+        :param kernel_size: size of the kernel
+        :param padding: padding type
+        :param stride: convolution stride
+        :param dilation: convolution dilation
+        :param tensor_dim:  dimension of the tensor (currently only 1 or 2 are supported)
+        :param causal: whether the convolution should be causal
+        :param groups:  number of groups for the convolution
+        :param activation: activation function to be used
+        :param separable: whether the convolution should be separable
+        :param pool_stride: stride for the pooling operation
+        :param pool_kernel: kernel size for the pooling operation
+        :param upsample: upsample factor
+        :param dropout: dropout probability
+        :param conv_init: convolutional layer initialization
+        :param bn_init: batch normalization layer initialization
+        """
 
         super(ConvBlock, self).__init__()
 
-        # layers : nn.Module = self._create_block_layers()
-
-        cur_channels = in_channels
-
-        self.layers = nn.Sequential()
-
-        for op in conv_block:
-            if type(op) is Operations:
-                if op == Operations.conv:
-                    self.layers.add_module(
-                        "conv",
-                        ConvLayer(
-                            in_channels=in_channels,
-                            out_channels=out_channels,
-                            kernel_size=kernel_size,
-                            padding=padding,
-                            stride=stride,
-                            upsample=upsample,
-                            dilation=dilation,
-                            tensor_type=tensor_type,
-                            causal=causal,
-                            groups=groups,
-                            separable=separable,
-                        ),
-                    )
-                    cur_channels = out_channels
-
-                elif op == Operations.max_pool or op == Operations.avg_pool:
-                    self.layers.add_module(
-                        op.name,
-                        PoolLayer(
-                            pool_stride,
-                            pool_kernel,
-                            pool_type=op.name,
-                            tensor_type=tensor_type,
-                        ),
-                    )
-
-                elif op == Operations.bn:
-                    bn_channels = cur_channels
-
-                    self.layers.add_module("bn", nn.BatchNorm2d(bn_channels))
-
-                elif op == Operations.dropout:
-                    self.layers.add_module("dropout", nn.Dropout2d(p=dropout))
-
-                elif op == Operations.upsample:
-                    self.layers.add_module(
-                        "upsample", nn.Upsample(scale_factor=upsample)
-                    )
-
-            elif type(op) is Activations:
-                self.layers.add_module(op.name, ActivationLayer(op))
-
+        self.layers = self._create_layers(
+            in_channels,
+            out_channels,
+            conv_block,
+            kernel_size,
+            padding,
+            stride,
+            dilation,
+            tensor_dim,
+            causal,
+            groups,
+            activation,
+            separable,
+            pool_stride,
+            pool_kernel,
+            upsample,
+            dropout,
+        )
 
         #  Initializing weights
-        self.layers.apply(partial(_init_weights(conv_init=conv_init, bn_init=bn_init)))
+        self.layers.apply(
+            partial(
+                self._init_weights,
+                conv_init=conv_init,
+                bn_init=bn_init,
+                activation=activation,
+            )
+        )
 
     def forward(self, x):
         return self.layers(x)
 
-    # def _create_block_layers(self, conv_block: tuple[Union[Operations, Activations]]) -> nn.Module:
-
-
-class OldConvBlock(nn.Module):
-    """Convolutional block abstraction. Input is assumed to be in canonical form: [Batch_size, channels, frames, features] for the 2d case."""
-
-    def __init__(
+    def _create_layers(
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: int = 3,
-        padding="SAME",
-        stride: int = 1,
-        dilation: int = 1,
-        tensor_type="2d",
-        conv_block="ConvBnActiv",
-        causal=False,
-        batch_norm=True,
-        groups=1,
-        activation="relu",
-        separable=False,
-        pool_stride=None,
-        pool_kernel=None,
-        upsample=None,
-        dropout=0.0,
-        conv_init="kaiming",
-        bn_init="default",
+        conv_block: Sequence[Operations],
+        kernel_size: _size_2_t,
+        padding: Union[str, _size_2_t],
+        stride: _size_2_t,
+        dilation: _size_2_t,
+        tensor_dim: int,
+        causal: bool,
+        groups: int,
+        activation: Activations,
+        separable: bool,
+        pool_stride: _size_2_t,
+        pool_kernel: _size_2_t,
+        upsample: _size_2_t,
+        dropout: float,
     ):
+        cur_channels = in_channels
 
-        super(ConvBlock, self).__init__()
+        layers = nn.Sequential()
 
-        op_list = re.findall("[A-Z][a-z]*", conv_block)
-        if not batch_norm and "Bn" in op_list:
-            op_list.remove("Bn")
-        dim = int(tensor_type[0])
+        conv_exists: bool = False
 
-        if type(kernel_size) is not tuple:
-            kernel_size = (kernel_size,) * dim
+        for i, op in enumerate(conv_block):
+            if not isinstance(op, Operations):
+                raise ValueError(f"Operation {op} not recognized.")
+            if op == Operations.conv:
+                conv = create_conv_layer(
+                    in_channels=cur_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    stride=stride,
+                    dilation=dilation,
+                    tensor_dim=tensor_dim,
+                    causal=causal,
+                    groups=groups,
+                    separable=separable,
+                )
 
-        if type(dilation) is not tuple:
-            dilation = (dilation,) * dim
+                layers.add_module(f"conv_{i}", conv)
+                cur_channels = out_channels
+                conv_exists = True
 
-        if type(stride) is not tuple:
-            stride = (stride,) * dim
-
-        self.layers = []
-        for ii, layer_name in enumerate(op_list):
-
-            if layer_name == "Conv":
-                self.layers.append(
-                    ConvLayer(
-                        in_channels=in_channels,
-                        out_channels=out_channels,
-                        kernel_size=kernel_size,
-                        padding=padding,
-                        stride=stride,
-                        upsample=upsample,
-                        dilation=dilation,
-                        tensor_type=tensor_type,
-                        causal=causal,
-                        groups=groups,
-                        separable=separable,
-                    )
-                )  # assumes the stride and kernel are the same size
-                nn.init.kaiming_normal_(self.layers[-1].conv_layer.weight)
-
-            elif layer_name in ["Avg", "Max"]:
-                self.layers.append(
+            elif op == Operations.max_pool or op == Operations.avg_pool:
+                layers.add_module(
+                    f"{op.name}_{i}",
                     PoolLayer(
                         pool_stride,
                         pool_kernel,
-                        pool_type=layer_name,
-                        tensor_type=tensor_type,
-                    )
+                        pool_type=op,
+                        tensor_dim=tensor_dim,
+                    ),
                 )
 
-            elif layer_name == "Bn":
-                if ii > op_list.index("Conv"):
-                    bn_channels = out_channels
-                else:
-                    bn_channels = in_channels
-                self.layers.append(nn.BatchNorm2d(bn_channels))
-                nn.init.constant_(self.layers[-1].weight, 1)
-                nn.init.constant_(self.layers[-1].bias, 0)
+            elif op == Operations.bn:
+                bn_channels = cur_channels
+                if tensor_dim == 2:
+                    layers.add_module(f"bn_{i}", nn.BatchNorm2d(bn_channels))
+                elif tensor_dim == 1:
+                    layers.add_module(f"bn_{i}", nn.BatchNorm1d(bn_channels))
 
-            elif layer_name == "Activ":
-                self.layers.append(ActivationLayer(activation))
+            elif op == Operations.dropout:
+                if tensor_dim == 2:
+                    layers.add_module(f"dropout_{i}", nn.Dropout2d(p=dropout))
+                elif tensor_dim == 1:
+                    layers.add_module(f"dropout_{i}", nn.Dropout(p=dropout))
 
-            elif layer_name == "Drop":
-                self.layers.append(nn.Dropout2d(p=dropout))
+            elif op == Operations.upsample:
+                layers.add_module(f"upsample_{i}", nn.Upsample(scale_factor=upsample))
 
-            elif layer_name == "Up":
-                self.layers.append(nn.Upsample(scale_factor=upsample))
+            elif op == Operations.activation:
+                layers.add_module(f"{activation.name}_{i}", ActivationLayer(activation))
 
-        self.layers = nn.Sequential(*self.layers)
+        if not conv_exists:
+            raise ValueError(
+                "At least one convolutional layer must be present in the block."
+            )
 
+        return layers
+
+    def _init_weights(
+        self,
+        m: nn.Module,
+        conv_init: WeightInit,
+        bn_init: WeightInit,
+        activation: Activations,
+    ):
         #  Initializing weights
-        for m in self.layers.modules():
-            if isinstance(m, nn.Conv2d):
-                if conv_init == "kaiming":
-                    nonlinearity = activation
-                    if isinstance(nonlinearity, str) and "Activ" in op_list:
-                        if activation == "relu":
-                            nn.init.zeros_(m.weight)
-                        elif activation == "elu":
-                            nn.init.zeros_(m.weight)
-                        elif activation == "lrelu":
-                            nn.init.zeros_(m.weight)
-                        else:
-                            nn.init.xavier_normal_(m.weight)
-                    else:
-                        nn.init.xavier_normal_(m.weight)
-                elif conv_init == "xavier":
-                    nn.init.xavier_normal_(m.weight)
-                elif conv_init == "zeros":
-                    nn.init.constant_(m.weight, 0.0)
+        if isinstance(m, nn.Conv2d):
+            if conv_init == WeightInit.kaiming:
+                if activation not in [
+                    Activations.relu,
+                    Activations.elu,
+                    Activations.lrelu,
+                    Activations.relu6,
+                ]:
+                    warnings.warn(
+                        f"Kaiming initialization is not recommended for {activation} activations."
+                    )
 
-            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                if bn_init == "ones":
-                    nn.init.constant_(m.weight, 1)
-                    nn.init.constant_(m.bias, 0)
-                elif bn_init == "zeros":
-                    # Zero-initialize the last BN in each residual branch,
-                    # so that the residual branch starts with zeros, and each residual block behaves like an identity.
-                    # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
-                    nn.init.constant_(m.weight, 0)
-                    nn.init.constant_(m.bias, 0)
+                nn.init.kaiming_normal_(m.weight, nonlinearity=activation.name)
 
-    def forward(self, x):
-        return self.layers(x)
+            elif conv_init == WeightInit.xavier:
+                nn.init.xavier_normal_(m.weight)
+
+            elif conv_init == WeightInit.zeros:
+                nn.init.zeros_(m.weight)
+
+            elif conv_init == WeightInit.ones:
+                nn.init.ones_(m.weight)
+
+            elif conv_init != WeightInit.default:
+                raise ValueError(
+                    f"Convolutional initialization {conv_init} not recognized."
+                )
+
+        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+            if bn_init == WeightInit.ones:
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif bn_init == WeightInit.zeros:
+                # Zero-initialize the last BN in each residual branch,
+                # so that the residual branch starts with zeros, and each residual block behaves like an identity.
+                # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
+                nn.init.zeros_(m.weight)
+                nn.init.zeros_(m.bias)
