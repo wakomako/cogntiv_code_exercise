@@ -1,6 +1,7 @@
+from torchinfo import summary
+
 from robust_conv_block.conv_block.conv_block import ConvBlock
 from utils.types import Operations, Activations, WeightInit
-from torchinfo import summary
 
 
 def main():

@@ -1,7 +1,4 @@
-from dataclasses import dataclass
 from enum import Enum, auto
-from typing import NewType, Tuple, Any
-
 
 class Activations(Enum):
     relu = auto()
@@ -28,6 +25,3 @@ class WeightInit(Enum):
     zeros = auto()
     ones = auto()
     default = auto()  # will use the default initialization of pytorch
-
-
-ParameterizedOps = NewType("ParameterizedOps", Tuple[Operations, dict[str, Any]])
